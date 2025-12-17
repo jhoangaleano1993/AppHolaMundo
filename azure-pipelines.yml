@@ -42,20 +42,56 @@ stages:
         displayName: 'Build, Test and Analyze'
         steps:
           - bash: |
+              # Obtener versión base del package.json
+              BASE_VERSION=$(cat package.json | grep '"version"' | sed 's/.*"version": "\([^"]*\)".*/\1/')
+              echo "Base version from package.json: ${BASE_VERSION}"
+
               if [[ "$(Build.SourceBranch)" == refs/tags/v* ]]; then
-                VERSION=$(echo "$(Build.SourceBranch)" | sed 's|refs/tags/||')
+                # Release tag: usar versión limpia (sin v)
+                VERSION=$(echo "$(Build.SourceBranch)" | sed 's|refs/tags/v||')
                 echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}"
                 echo "##vso[task.setvariable variable=isRelease;isOutput=true]true"
-                echo "Building release version: ${VERSION}"
-              else
-                VERSION=$(cat package.json | grep '"version"' | sed 's/.*"version": "\([^"]*\)".*/\1/')
-                echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}-build.$(Build.BuildId)"
-                echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${VERSION}"
+                echo "##vso[build.updatebuildnumber]${VERSION}"
+                echo "🚀 Production Release: ${VERSION}"
+
+              elif [[ "$(Build.SourceBranch)" == refs/heads/release/* ]]; then
+                # Release candidate para QA
+                VERSION="${BASE_VERSION}-rc.$(Build.BuildId)"
+                echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}"
+                echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
                 echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
-                echo "Building version: ${VERSION}-build.$(Build.BuildId)"
+                echo "##vso[build.updatebuildnumber]${VERSION}"
+                echo "🧪 Release Candidate: ${VERSION}"
+
+              elif [[ "$(Build.SourceBranch)" == refs/heads/dev ]]; then
+                # Development build
+                VERSION="${BASE_VERSION}-dev.$(Build.BuildId)"
+                echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}"
+                echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
+                echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
+                echo "##vso[build.updatebuildnumber]${VERSION}"
+                echo "🔧 Development Build: ${VERSION}"
+
+              elif [[ "$(Build.SourceBranch)" == refs/heads/main ]]; then
+                # Main branch - preparación para release
+                VERSION="${BASE_VERSION}"
+                echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}"
+                echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
+                echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
+                echo "##vso[build.updatebuildnumber]${VERSION}"
+                echo "📦 Main Build: ${VERSION}"
+
+              else
+                # Feature branch o cualquier otra rama
+                VERSION="${BASE_VERSION}-alpha.$(Build.BuildId)"
+                echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}"
+                echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
+                echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
+                echo "##vso[build.updatebuildnumber]${VERSION}"
+                echo "🌿 Feature Build: ${VERSION}"
               fi
             name: setVersion
-            displayName: 'Set Version Tag'
+            displayName: 'Set Semantic Version'
 
           - template: templates/build-steps.yml@templates
             parameters:
@@ -89,7 +125,10 @@ stages:
         displayName: 'Build and Push Docker Image'
         steps:
           - bash: |
-              echo "Image Tag: $(imageTag)"
+              echo "=============================================="
+              echo "  Building Docker Image"
+              echo "  Tag: $(imageTag)"
+              echo "=============================================="
             displayName: 'Show Image Tag'
 
           - template: templates/docker-build.yml@templates
@@ -100,7 +139,6 @@ stages:
               ecrRegistry: '$(ECR_REGISTRY)'
               tags:
                 - '$(imageTag)'
-                - '$(Build.SourceBranchName)'
                 - 'latest'
 
   - stage: DeployDev
@@ -188,7 +226,10 @@ stages:
               set -e
 
               VERSION="v$(packageVersion)"
-              echo "Checking if tag ${VERSION} exists..."
+              echo "=============================================="
+              echo "  Creating Release Tag"
+              echo "  Version: ${VERSION}"
+              echo "=============================================="
 
               # Verificar si el tag ya existe
               if git tag -l | grep -q "^${VERSION}$"; then
@@ -198,9 +239,15 @@ stages:
                 echo "Creating tag ${VERSION}..."
                 git config user.email "azure-pipeline@devops.com"
                 git config user.name "Azure Pipeline"
-                git tag -a "${VERSION}" -m "Release ${VERSION} - Auto-generated from CI/CD pipeline"
+                git tag -a "${VERSION}" -m "Release ${VERSION}
+
+              Semantic Version: $(packageVersion)
+              Build: $(Build.BuildId)
+              Pipeline: $(Build.DefinitionName)
+              Auto-generated from CI/CD pipeline"
+
                 git push origin "${VERSION}"
-                echo "##vso[task.logissue type=warning]Tag ${VERSION} created successfully!"
+                echo "##vso[task.logissue type=warning]Tag ${VERSION} created and pushed successfully!"
                 echo "##vso[task.setvariable variable=tagCreated;isOutput=true]true"
                 echo "##vso[task.setvariable variable=releaseVersion;isOutput=true]${VERSION}"
               fi
