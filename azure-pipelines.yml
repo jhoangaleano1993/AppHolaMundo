@@ -52,7 +52,7 @@ stages:
                 echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}"
                 echo "##vso[task.setvariable variable=isRelease;isOutput=true]true"
                 echo "##vso[build.updatebuildnumber]${VERSION}"
-                echo "🚀 Production Release: ${VERSION}"
+                echo "Production Release: ${VERSION}"
 
               elif [[ "$(Build.SourceBranch)" == refs/heads/release/* ]]; then
                 # Release candidate para QA
@@ -61,7 +61,7 @@ stages:
                 echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
                 echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
                 echo "##vso[build.updatebuildnumber]${VERSION}"
-                echo "🧪 Release Candidate: ${VERSION}"
+                echo "Release Candidate: ${VERSION}"
 
               elif [[ "$(Build.SourceBranch)" == refs/heads/dev ]]; then
                 # Development build
@@ -70,7 +70,7 @@ stages:
                 echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
                 echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
                 echo "##vso[build.updatebuildnumber]${VERSION}"
-                echo "🔧 Development Build: ${VERSION}"
+                echo "Development Build: ${VERSION}"
 
               elif [[ "$(Build.SourceBranch)" == refs/heads/main ]]; then
                 # Main branch - preparación para release
@@ -79,7 +79,7 @@ stages:
                 echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
                 echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
                 echo "##vso[build.updatebuildnumber]${VERSION}"
-                echo "📦 Main Build: ${VERSION}"
+                echo "Main Build: ${VERSION}"
 
               else
                 # Feature branch o cualquier otra rama
@@ -88,7 +88,7 @@ stages:
                 echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${BASE_VERSION}"
                 echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
                 echo "##vso[build.updatebuildnumber]${VERSION}"
-                echo "🌿 Feature Build: ${VERSION}"
+                echo "Feature Build: ${VERSION}"
               fi
             name: setVersion
             displayName: 'Set Semantic Version'
@@ -143,7 +143,9 @@ stages:
 
   - stage: DeployDev
     displayName: 'Deploy to Development'
-    dependsOn: ContainerBuild
+    dependsOn:
+      - Build
+      - ContainerBuild
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/dev'))
     variables:
       imageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
@@ -151,10 +153,24 @@ stages:
       - deployment: DeployToEKS
         displayName: 'Deploy to Development EKS'
         environment: 'Development'
+        variables:
+          deployImageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
         strategy:
           runOnce:
             deploy:
               steps:
+                - download: none
+
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'k8s'
+                    path: '$(Pipeline.Workspace)/k8s'
+
+                - bash: |
+                    echo "Deploying with image tag: $(deployImageTag)"
+                    echo "Full image: $(ECR_REGISTRY)/$(imageName):$(deployImageTag)"
+                  displayName: 'Show Deploy Info'
+
                 - template: templates/k8s-deploy.yml@templates
                   parameters:
                     kubernetesServiceConnection: '$(kubernetesServiceConnection)'
@@ -162,7 +178,7 @@ stages:
                     manifests: |
                       $(Pipeline.Workspace)/k8s/deployment.yaml
                       $(Pipeline.Workspace)/k8s/service.yaml
-                    imageName: '$(ECR_REGISTRY)/$(imageName):$(imageTag)'
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(deployImageTag)'
 
                 - template: templates/connectivity-test.yml@templates
                   parameters:
@@ -176,7 +192,9 @@ stages:
 
   - stage: DeployQA
     displayName: 'Deploy to QA'
-    dependsOn: ContainerBuild
+    dependsOn:
+      - Build
+      - ContainerBuild
     condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/heads/release/'))
     variables:
       imageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
@@ -184,10 +202,19 @@ stages:
       - deployment: DeployToEKSQA
         displayName: 'Deploy to QA EKS'
         environment: 'QA'
+        variables:
+          deployImageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
         strategy:
           runOnce:
             deploy:
               steps:
+                - download: none
+
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'k8s'
+                    path: '$(Pipeline.Workspace)/k8s'
+
                 - template: templates/k8s-deploy.yml@templates
                   parameters:
                     kubernetesServiceConnection: '$(kubernetesServiceConnection)'
@@ -195,7 +222,7 @@ stages:
                     manifests: |
                       $(Pipeline.Workspace)/k8s/deployment.yaml
                       $(Pipeline.Workspace)/k8s/service.yaml
-                    imageName: '$(ECR_REGISTRY)/$(imageName):$(imageTag)'
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(deployImageTag)'
 
                 - template: templates/connectivity-test.yml@templates
                   parameters:
@@ -210,7 +237,9 @@ stages:
   # Stage para crear tag automático cuando se hace merge a main
   - stage: CreateRelease
     displayName: 'Create Release Tag'
-    dependsOn: ContainerBuild
+    dependsOn:
+      - Build
+      - ContainerBuild
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     variables:
       packageVersion: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.packageVersion'] ]
@@ -256,7 +285,9 @@ stages:
 
   - stage: DeployProd
     displayName: 'Deploy to Production'
-    dependsOn: ContainerBuild
+    dependsOn:
+      - Build
+      - ContainerBuild
     condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
     variables:
       imageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
@@ -264,10 +295,19 @@ stages:
       - deployment: DeployToEKSProd
         displayName: 'Deploy to Production EKS'
         environment: 'Production'
+        variables:
+          deployImageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
         strategy:
           runOnce:
             deploy:
               steps:
+                - download: none
+
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'k8s'
+                    path: '$(Pipeline.Workspace)/k8s'
+
                 - template: templates/k8s-deploy.yml@templates
                   parameters:
                     kubernetesServiceConnection: '$(kubernetesServiceConnection)'
@@ -275,7 +315,7 @@ stages:
                     manifests: |
                       $(Pipeline.Workspace)/k8s/deployment.yaml
                       $(Pipeline.Workspace)/k8s/service.yaml
-                    imageName: '$(ECR_REGISTRY)/$(imageName):$(imageTag)'
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(deployImageTag)'
 
                 - template: templates/connectivity-test.yml@templates
                   parameters:
