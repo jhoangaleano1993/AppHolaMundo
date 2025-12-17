@@ -2,7 +2,10 @@ trigger:
   branches:
     include:
       - main
-      - develop
+      - dev
+  tags:
+    include:
+      - v*
   paths:
     exclude:
       - README.md
@@ -38,6 +41,22 @@ stages:
       - job: BuildAndTest
         displayName: 'Build, Test and Analyze'
         steps:
+          - bash: |
+              if [[ "$(Build.SourceBranch)" == refs/tags/v* ]]; then
+                VERSION=$(echo "$(Build.SourceBranch)" | sed 's|refs/tags/||')
+                echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}"
+                echo "##vso[task.setvariable variable=isRelease;isOutput=true]true"
+                echo "Building release version: ${VERSION}"
+              else
+                VERSION=$(cat package.json | grep '"version"' | sed 's/.*"version": "\([^"]*\)".*/\1/')
+                echo "##vso[task.setvariable variable=imageTag;isOutput=true]${VERSION}-build.$(Build.BuildId)"
+                echo "##vso[task.setvariable variable=packageVersion;isOutput=true]${VERSION}"
+                echo "##vso[task.setvariable variable=isRelease;isOutput=true]false"
+                echo "Building version: ${VERSION}-build.$(Build.BuildId)"
+              fi
+            name: setVersion
+            displayName: 'Set Version Tag'
+
           - template: templates/build-steps.yml@templates
             parameters:
               nodeVersion: '20.x'
@@ -63,26 +82,33 @@ stages:
     displayName: 'Build and Push Container'
     dependsOn: Build
     condition: succeeded()
+    variables:
+      imageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
     jobs:
       - job: Docker
         displayName: 'Build and Push Docker Image'
         steps:
+          - bash: |
+              echo "Image Tag: $(imageTag)"
+            displayName: 'Show Image Tag'
+
           - template: templates/docker-build.yml@templates
             parameters:
               imageName: '$(imageName)'
               dockerfilePath: '$(dockerfilePath)'
               awsRegion: '$(AWS_REGION)'
               ecrRegistry: '$(ECR_REGISTRY)'
-              tags: 
-                - "$(Build.BuildId)"
-                - "$(Build.SourceBranchName)"
-                - "latest"
-
+              tags:
+                - '$(imageTag)'
+                - '$(Build.SourceBranchName)'
+                - 'latest'
 
   - stage: DeployDev
     displayName: 'Deploy to Development'
     dependsOn: ContainerBuild
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/dev'))
+    variables:
+      imageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
     jobs:
       - deployment: DeployToEKS
         displayName: 'Deploy to Development EKS'
@@ -98,7 +124,7 @@ stages:
                     manifests: |
                       $(Pipeline.Workspace)/k8s/deployment.yaml
                       $(Pipeline.Workspace)/k8s/service.yaml
-                    imageName: '$(ECR_REGISTRY)/$(imageName):$(Build.BuildId)'
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(imageTag)'
 
                 - template: templates/connectivity-test.yml@templates
                   parameters:
@@ -114,6 +140,8 @@ stages:
     displayName: 'Deploy to QA'
     dependsOn: ContainerBuild
     condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/heads/release/'))
+    variables:
+      imageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
     jobs:
       - deployment: DeployToEKSQA
         displayName: 'Deploy to QA EKS'
@@ -129,7 +157,7 @@ stages:
                     manifests: |
                       $(Pipeline.Workspace)/k8s/deployment.yaml
                       $(Pipeline.Workspace)/k8s/service.yaml
-                    imageName: '$(ECR_REGISTRY)/$(imageName):$(Build.BuildId)'
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(imageTag)'
 
                 - template: templates/connectivity-test.yml@templates
                   parameters:
@@ -141,10 +169,50 @@ stages:
                     maxRetries: 5
                     retryDelay: 10
 
+  # Stage para crear tag automático cuando se hace merge a main
+  - stage: CreateRelease
+    displayName: 'Create Release Tag'
+    dependsOn: ContainerBuild
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    variables:
+      packageVersion: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.packageVersion'] ]
+    jobs:
+      - job: CreateTag
+        displayName: 'Create Git Tag'
+        steps:
+          - checkout: self
+            persistCredentials: true
+            fetchDepth: 0
+
+          - bash: |
+              set -e
+
+              VERSION="v$(packageVersion)"
+              echo "Checking if tag ${VERSION} exists..."
+
+              # Verificar si el tag ya existe
+              if git tag -l | grep -q "^${VERSION}$"; then
+                echo "##vso[task.logissue type=warning]Tag ${VERSION} already exists. Skipping tag creation."
+                echo "##vso[task.setvariable variable=tagCreated;isOutput=true]false"
+              else
+                echo "Creating tag ${VERSION}..."
+                git config user.email "azure-pipeline@devops.com"
+                git config user.name "Azure Pipeline"
+                git tag -a "${VERSION}" -m "Release ${VERSION} - Auto-generated from CI/CD pipeline"
+                git push origin "${VERSION}"
+                echo "##vso[task.logissue type=warning]Tag ${VERSION} created successfully!"
+                echo "##vso[task.setvariable variable=tagCreated;isOutput=true]true"
+                echo "##vso[task.setvariable variable=releaseVersion;isOutput=true]${VERSION}"
+              fi
+            name: createTag
+            displayName: 'Create and Push Git Tag'
+
   - stage: DeployProd
     displayName: 'Deploy to Production'
     dependsOn: ContainerBuild
-    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
+    variables:
+      imageTag: $[ stageDependencies.Build.BuildAndTest.outputs['setVersion.imageTag'] ]
     jobs:
       - deployment: DeployToEKSProd
         displayName: 'Deploy to Production EKS'
@@ -160,7 +228,7 @@ stages:
                     manifests: |
                       $(Pipeline.Workspace)/k8s/deployment.yaml
                       $(Pipeline.Workspace)/k8s/service.yaml
-                    imageName: '$(ECR_REGISTRY)/$(imageName):$(Build.BuildId)'
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(imageTag)'
 
                 - template: templates/connectivity-test.yml@templates
                   parameters:
