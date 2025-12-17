@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-hola-mundo-service
+  labels:
+    app: app-hola-mundo
+spec:
+  type: LoadBalancer
+  selector:
+    app: app-hola-mundo
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+      name: http
+  sessionAffinity: None
