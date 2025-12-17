@@ -1,0 +1,164 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: jhoangaleano1993/AzureDevOpsTemplate
+      ref: refs/heads/dev
+      endpoint: AzureDevOpsTemplate
+
+pool:
+  name: Default
+
+variables:
+  - name: imageName
+    value: 'app-hola-mundo'
+  - name: dockerfilePath
+    value: '$(Build.SourcesDirectory)/Dockerfile'
+  - name: kubernetesServiceConnection
+    value: 'eks-cluster-connection'
+  - group: AWS-Credentials
+  - group: AWS-ECR
+  - group: SonarCloud-Shared
+  - group: SonarCloud-AppHolaMundo
+
+stages:
+  - stage: Build
+    displayName: 'Build and Test'
+    jobs:
+      - job: BuildAndTest
+        displayName: 'Build, Test and Analyze'
+        steps:
+          - template: templates/build-steps.yml@templates
+            parameters:
+              nodeVersion: '20.x'
+
+          - template: templates/test-steps.yml@templates
+            parameters:
+              testCommand: 'npm run test:coverage'
+              publishTestResults: true
+
+          - template: templates/sonar-analysis.yml@templates
+            parameters:
+              sonarProjectKey: '$(SONAR_PROJECT_KEY)'
+              sonarOrganization: '$(SONAR_ORGANIZATION)'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Kubernetes Manifests'
+            inputs:
+              targetPath: '$(Build.SourcesDirectory)/k8s'
+              artifact: 'k8s'
+              publishLocation: 'pipeline'
+
+  - stage: ContainerBuild
+    displayName: 'Build and Push Container'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: Docker
+        displayName: 'Build and Push Docker Image'
+        steps:
+          - template: templates/docker-build.yml@templates
+            parameters:
+              imageName: '$(imageName)'
+              dockerfilePath: '$(dockerfilePath)'
+              awsRegion: '$(AWS_REGION)'
+              ecrRegistry: '$(ECR_REGISTRY)'
+              tags: 
+                - "$(Build.BuildId)"
+                - "$(Build.SourceBranchName)"
+                - "latest"
+
+
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: ContainerBuild
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/dev'))
+    jobs:
+      - deployment: DeployToEKS
+        displayName: 'Deploy to Development EKS'
+        environment: 'Development'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/k8s-deploy.yml@templates
+                  parameters:
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'dev'
+                    manifests: |
+                      $(Pipeline.Workspace)/k8s/deployment.yaml
+                      $(Pipeline.Workspace)/k8s/service.yaml
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(Build.BuildId)'
+
+                - template: templates/connectivity-test.yml@templates
+                  parameters:
+                    serviceUrl: 'http://app-hola-mundo-service.dev.svc.cluster.local:3000'
+                    healthEndpoint: '/health'
+                    maxRetries: 5
+                    retryDelay: 10
+
+  - stage: DeployQA
+    displayName: 'Deploy to QA'
+    dependsOn: ContainerBuild
+    condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/heads/release/'))
+    jobs:
+      - deployment: DeployToEKSQA
+        displayName: 'Deploy to QA EKS'
+        environment: 'QA'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/k8s-deploy.yml@templates
+                  parameters:
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'qa'
+                    manifests: |
+                      $(Pipeline.Workspace)/k8s/deployment.yaml
+                      $(Pipeline.Workspace)/k8s/service.yaml
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(Build.BuildId)'
+
+                - template: templates/connectivity-test.yml@templates
+                  parameters:
+                    serviceUrl: 'http://app-hola-mundo-service.qa.svc.cluster.local:3000'
+                    healthEndpoint: '/health'
+                    maxRetries: 5
+                    retryDelay: 10
+
+  - stage: DeployProd
+    displayName: 'Deploy to Production'
+    dependsOn: ContainerBuild
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployToEKSProd
+        displayName: 'Deploy to Production EKS'
+        environment: 'Production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/k8s-deploy.yml@templates
+                  parameters:
+                    kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+                    namespace: 'production'
+                    manifests: |
+                      $(Pipeline.Workspace)/k8s/deployment.yaml
+                      $(Pipeline.Workspace)/k8s/service.yaml
+                    imageName: '$(ECR_REGISTRY)/$(imageName):$(Build.BuildId)'
+
+                - template: templates/connectivity-test.yml@templates
+                  parameters:
+                    serviceUrl: 'http://app-hola-mundo-service.production.svc.cluster.local:3000'
+                    healthEndpoint: '/health'
+                    maxRetries: 5
+                    retryDelay: 10
